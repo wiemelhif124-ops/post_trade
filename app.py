@@ -10,13 +10,19 @@ from decimal import Decimal
 
 import altair as alt
 import rapport_ui
-import garde
 import menu_discussions as disc
 import ollama
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import make_url 
+
+# --- Nouveaux agents (dans src/) ---
+from src.agents import securite as garde_v2
+from src.agents import controle as controle_v2
+from src.agents import sql_agent as sql_agent_v2 
+from src.agents import analyste as analyste_v2
+# from src.agents import sql_agent as sql_agent_v2  # ← à activer quand tu migres l'agent SQL
 
 # =====================  CONFIGURATION  =====================
 MODEL = "qwen2.5-coder:3b"
@@ -53,7 +59,7 @@ instructions.id_compte = comptes_clients.id_compte ; instructions.isin = titres.
 mouvements_cash.id_compte = comptes_clients.id_compte
 """
 
-# =====================  AGENT 1 : SQL  =====================
+# =====================  AGENT SQL (ancien - à migrer plus tard)  =====================
 PROMPT_SQL = """Tu es l'Agent SQL d'un système de monitoring post-trade (règlement-livraison, custody, cash).
 Date du jour : {today}. {dialect_hint}
 Tu réponds UNIQUEMENT en JSON : {"sql": "...", "affichage": "courbe|histogramme|tableau|kpi", "titre": "..."}
@@ -116,19 +122,6 @@ def agent_sql(question, erreur=None):
     return json.loads(appeler_llm(system, user, json_mode=True))
 
 
-# =====================  AGENT 2 : CONTRÔLE  =====================
-def agent_controle(sql):
-    s = sql.strip().rstrip(";").lower()
-    interdits = r"\b(insert|update|delete|drop|alter|create|attach|detach|pragma|replace|vacuum|truncate|grant|merge|exec|execute)\b"
-    if not (s.startswith("select") or s.startswith("with")):
-        return False, "Seules les requêtes SELECT sont autorisées."
-    if re.search(interdits, s):
-        return False, "Mot-clé interdit détecté."
-    if ";" in s:
-        return False, "Une seule requête est autorisée."
-    return True, "OK"
-
-
 def executer(sql):
     with engine.connect() as conn:
         df = pd.read_sql_query(text(sql.strip().rstrip(";")), conn)
@@ -138,7 +131,7 @@ def executer(sql):
     return df
 
 
-# =====================  AGENT 4 : AFFICHAGE  =====================
+# =====================  AFFICHAGE  =====================
 AFFICHAGES = {"tableau": "Tableau", "histogramme": "Histogramme", "courbe": "Courbe", "kpi": "KPI"}
 
 
@@ -335,30 +328,38 @@ def traiter(question):
     nom_rapport = rapport_ui.detecter_rapport(question)
     if nom_rapport:
         return rapport_ui.traiter_rapport(nom_rapport, engine, appeler_llm, noter)
-    message_garde = garde.reponse_garde(question)
+        
+    # Agent Sécurité V2 (src/agents/securite.py)
+    message_garde = garde_v2.reponse_garde(question)
     if message_garde:
         return {"id": time.time_ns(), "question": question, "info": message_garde, "sql": "", "etapes": []}
+        
     noter("Agent SQL : génération de la requête")
-    rep = agent_sql(question)
+    rep = sql_agent_v2.generer(question)
+    
     if rep.get("hors_sujet") or not str(rep.get("sql", "")).strip():
-        return {"id": time.time_ns(), "question": question, "info": garde.MESSAGE_AIDE, "sql": "", "etapes": []}
-    ok, msg = agent_controle(rep["sql"])
+        return {"id": time.time_ns(), "question": question, "info": garde_v2.MESSAGE_AIDE, "sql": "", "etapes": []}
+        
+    # Agent Contrôle V2 (src/agents/controle.py)
+    ok, msg = controle_v2.verifier(rep["sql"])
     noter(f"Agent Contrôle : {msg}")
     if not ok:
         raise ValueError(msg)
+        
     try:
         df = executer(rep["sql"])
     except Exception as e:
         noter("Agent SQL : correction après erreur")
-        rep = agent_sql(question, erreur=str(e))
-        ok, msg = agent_controle(rep["sql"])
+        rep = sql_agent_v2.generer(question, erreur=str(e))
+        # Agent Contrôle V2 (après correction)
+        ok, msg = controle_v2.verifier(rep["sql"])
         if not ok:
             raise ValueError(msg)
         df = executer(rep["sql"])
+        
     vue = choisir_vue(df, rep.get("affichage", "tableau"), question)
     noter(f"Agent Affichage : {len(df)} ligne(s), vue choisie « {vue} »")
-    commentaire = ""
-
+    commentaire = analyste_v2.commenter(question, df)
     return {"id": time.time_ns(), "question": question, "sql": rep["sql"], "df": df,
             "affichage": vue, "titre": rep.get("titre", "Résultat"),
             "commentaire": commentaire, "etapes": etapes}
