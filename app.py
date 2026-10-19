@@ -9,8 +9,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import altair as alt
-import rapport_ui
-import menu_discussions as disc
+import rapport_ui 
+from src.agents import historiseur as disc
 import ollama
 import pandas as pd
 import streamlit as st
@@ -21,7 +21,8 @@ from sqlalchemy.engine import make_url
 from src.agents import securite as garde_v2
 from src.agents import controle as controle_v2
 from src.agents import sql_agent as sql_agent_v2 
-from src.agents import analyste as analyste_v2
+from src.agents import analyste as analyste_v2 
+from src.agents import rapporteur as rapporteur_v2
 # from src.agents import sql_agent as sql_agent_v2  # ← à activer quand tu migres l'agent SQL
 
 # =====================  CONFIGURATION  =====================
@@ -327,8 +328,7 @@ def traiter(question):
 
     nom_rapport = rapport_ui.detecter_rapport(question)
     if nom_rapport:
-        return rapport_ui.traiter_rapport(nom_rapport, engine, appeler_llm, noter)
-        
+            return rapporteur_v2.generer(nom_rapport, engine, noter)
     # Agent Sécurité V2 (src/agents/securite.py)
     message_garde = garde_v2.reponse_garde(question)
     if message_garde:
@@ -370,6 +370,7 @@ st.set_page_config(page_title="Post-trade GenAI", layout="wide")
 
 # --- Menu latéral : discussions enregistrées + bouton "+ Nouveau" ---
 disc.menu()
+
 
 st.title("Assistant GenAI  : monitoring post-trade")
 afficher_indicateurs()
@@ -436,18 +437,25 @@ if question:
                     status.update(label="Erreur", state="error")
     zone.empty()
 
-    # On enregistre TOUS les résultats (SQL + rapports allégés)
+       # On enregistre TOUS les résultats dans l'historique
     r = st.session_state.get("resultat")
-    if r and "erreur" not in r and not r.get("info"):
+    if r:
         disc.ajouter(r)
+        # On force le rafraîchissement pour que la sidebar se mette à jour immédiatement
         st.rerun()
-
 
 # --- 4) Afficher le dernier résultat s'il n'est pas dans l'historique ---
 if st.session_state.get("resultat"):
     dernier = st.session_state["resultat"]
-    if dernier.get("rapport") or dernier.get("info") or "erreur" in dernier:
+    # On vérifie si ce résultat est déjà affiché par l'historique
+    deja_affiche = any(r.get("id") == dernier.get("id") for r in disc.resultats_courants())
+    
+    if not deja_affiche:
         afficher_resultat(dernier)
+        
+    # ON NETTOIE : on le retire de la mémoire pour ne pas l'afficher au prochain clic
+    if not dernier.get("erreur"): 
+        st.session_state.pop("resultat", None)
 
 
 # --- 5) Brouillon vocal ---
