@@ -2,6 +2,9 @@
 import json
 
 import ollama
+import os
+os.environ["OLLAMA_HOST"] = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+os.environ["OLLAMA_HOST"] = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 from src.core.config import MODEL
 

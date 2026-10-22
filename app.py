@@ -1,7 +1,6 @@
-"""Système GenAI multi-agents pour l'analyse et le monitoring des opérations post-trade.
-Entrée : texte OU voix. Base : SQLite / PostgreSQL / Oracle (à régler dans DB_URL).
-Lancer : streamlit run app.py
-"""
+"""Système GenAI multi-agents pour l'analyse et le monitoring des opérations post-trade."""
+import os
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 import json
 import re
 import time
@@ -17,110 +16,49 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url 
 
-# --- Nouveaux agents (dans src/) ---
 from src.agents import securite as garde_v2
 from src.agents import controle as controle_v2
 from src.agents import sql_agent as sql_agent_v2 
 from src.agents import analyste as analyste_v2 
-from src.agents import rapporteur as rapporteur_v2
-# from src.agents import sql_agent as sql_agent_v2  # ← à activer quand tu migres l'agent SQL
+from src.agents import rapporteur as rapporteur_v2 
+from src.core.config import DB_URL 
+from src.agents import routeur as routeur_v2
+from src.agents import correcteur as correcteur_v2
 
 # =====================  CONFIGURATION  =====================
 MODEL = "qwen2.5-coder:3b"
 VOICE_LANG = "fr"
 WHISPER_SIZE = "tiny"
 
-DB_URL = "postgresql+psycopg2://agent_ro:agent_ro_pwd@localhost:5432/posttrade"
-# DB_URL = "sqlite:///file:post_trade.db?mode=ro&uri=true"
-# DB_URL = "oracle+oracledb://user:motdepasse@localhost:1521/?service_name=XE"
-
 DIALECT = make_url(DB_URL).get_backend_name()
+engine = create_engine(DB_URL)
 
 DIALECT_HINTS = {
-    "sqlite": "Base SQLite. Dates: date('now'), date('now','+7 days'). Limiter: LIMIT n. "
-              "Prochain lundi: date('now','weekday 1','+1 day','weekday 1').",
     "postgresql": "Base PostgreSQL. Dates: CURRENT_DATE, CURRENT_DATE + INTERVAL '7 days'. Limiter: LIMIT n. "
-                  "Prochain lundi: (date_trunc('week', CURRENT_DATE) + INTERVAL '7 days')::date. "
-                  "Les colonnes de date sont de type DATE.",
-    "oracle": "Base Oracle. Dates: TRUNC(SYSDATE), TRUNC(SYSDATE) + 7. Limiter: FETCH FIRST n ROWS ONLY "
-              "(jamais LIMIT). Prochain lundi: TRUNC(SYSDATE,'IW') + 7. Pas de point-virgule final.",
+                  "Prochain lundi: (date_trunc('week', CURRENT_DATE) + INTERVAL '7 days')::date.",
 }
 
 SCHEMA = """
-clients(id_client, nom, pays, type_client)            -- type_client: banque|assurance|fonds|entreprise
-comptes_clients(id_compte, id_client, type_compte, devise, solde)  -- type_compte: titres|cash ; devise: TND|EUR|USD
-titres(isin, nom, type_titre, emetteur)               -- type_titre: action|obligation
+clients(id_client, nom, pays, type_client)
+comptes_clients(id_compte, id_client, type_compte, devise, solde)
+titres(isin, nom, type_titre, emetteur)
 instructions(id_instruction, id_compte, isin, sens, quantite, montant, devise,
              date_negociation, date_reglement, statut, motif_echec)
-   -- sens: achat|vente ; statut: en_attente|apparie|regle|echoue
 mouvements_cash(id_mouvement, id_compte, sens, montant, devise, date_valeur, statut)
-   -- sens: entrant|sortant ; statut: prevu|execute
-Jointures : comptes_clients.id_client = clients.id_client ;
-instructions.id_compte = comptes_clients.id_compte ; instructions.isin = titres.isin ;
-mouvements_cash.id_compte = comptes_clients.id_compte
 """
 
-# =====================  AGENT SQL (ancien - à migrer plus tard)  =====================
-PROMPT_SQL = """Tu es l'Agent SQL d'un système de monitoring post-trade (règlement-livraison, custody, cash).
-Date du jour : {today}. {dialect_hint}
+PROMPT_SQL = """Tu es l'Agent SQL. Date du jour : {today}. {dialect_hint}
 Tu réponds UNIQUEMENT en JSON : {"sql": "...", "affichage": "courbe|histogramme|tableau|kpi", "titre": "..."}
-
-Règles :
-- Uniquement une requête SELECT, sur les tables ci-dessous, sans point-virgule final.
-- "semaine prochaine" = du lundi prochain au dimanche suivant (7 jours).
-- "échoué" = statut 'echoue'. "en TND" = devise 'TND'.
-- affichage : kpi = un seul chiffre ; courbe = évolution dans le temps ;
-  histogramme = comparaison entre catégories ; tableau = liste de lignes.
-- Si l'utilisateur demande une liste (clients, comptes...), utilise "tableau".
-- Si la question n'a aucun rapport avec les données post-trade (salutation, culture générale, texte incompréhensible), réponds {"sql": "", "affichage": "tableau", "titre": "", "hors_sujet": true}.
-
-Schéma :
-{schema}
-
-Exemples :
-Q: donner tous les clients
-R: {"sql": "SELECT * FROM clients", "affichage": "tableau", "titre": "Tous les clients"}
-Q: donner les comptes en TND
-R: {"sql": "SELECT c.nom, cc.type_compte, cc.solde FROM comptes_clients cc JOIN clients c ON c.id_client=cc.id_client WHERE cc.devise='TND'", "affichage": "tableau", "titre": "Comptes en TND"}
-Q: nombre d'instructions échouées par motif
-R: {"sql": "SELECT motif_echec, COUNT(*) AS nb FROM instructions WHERE statut='echoue' GROUP BY motif_echec", "affichage": "histogramme", "titre": "Échecs par motif"}
-Q: évolution du nombre d'instructions par jour de règlement
-R: {"sql": "SELECT date_reglement, COUNT(*) AS nb FROM instructions GROUP BY date_reglement ORDER BY date_reglement", "affichage": "courbe", "titre": "Instructions par date de règlement"}
-Q: répartition des instructions par statut
-R: {"sql": "SELECT statut, COUNT(*) AS nb FROM instructions GROUP BY statut", "affichage": "histogramme", "titre": "Instructions par statut"}
-Q: montant total des instructions par devise
-R: {"sql": "SELECT devise, SUM(montant) AS total FROM instructions GROUP BY devise", "affichage": "histogramme", "titre": "Montant total par devise"}
-Q: combien d'instructions sont en attente ?
-R: {"sql": "SELECT COUNT(*) AS nb FROM instructions WHERE statut='en_attente'", "affichage": "kpi", "titre": "Instructions en attente"}
-Q: bonjour
-R: {"sql": "", "affichage": "tableau", "titre": "", "hors_sujet": true}
-Q: quelle est la capitale de la France
-R: {"sql": "", "affichage": "tableau", "titre": "", "hors_sujet": true}
+Règles : Uniquement SELECT. Schéma : {schema}
 """
 
-PROMPT_ANALYSTE = """Tu es l'Agent Analyste post-trade. À partir de la question et du résultat,
-écris un commentaire de 1 à 2 phrases en français. Cite uniquement des faits chiffrés présents dans le résultat
-(valeur la plus grande, la plus petite, total). N'interprète pas, n'invente rien."""
-
-engine = create_engine(DB_URL)
+PROMPT_ANALYSTE = """Tu es l'Agent Analyste. Écris un commentaire de 1 à 2 phrases en français."""
 
 
 def appeler_llm(system, user, json_mode=False):
     kwargs = {"format": "json"} if json_mode else {}
-    rep = ollama.chat(
-        model=MODEL,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        **kwargs,
-    )
+    rep = ollama.chat(model=MODEL, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}], **kwargs)
     return rep["message"]["content"]
-
-
-def agent_sql(question, erreur=None):
-    system = (PROMPT_SQL.replace("{today}", date.today().isoformat())
-              .replace("{dialect_hint}", DIALECT_HINTS[DIALECT])
-              .replace("{schema}", SCHEMA))
-    user = question if not erreur else f"{question}\n\nTa requête précédente a échoué : {erreur}. Corrige-la."
-    return json.loads(appeler_llm(system, user, json_mode=True))
 
 
 def executer(sql):
@@ -149,15 +87,12 @@ def fmt(v):
 
 
 def colonnes_numeriques(df):
-    return [c for c in df.columns
-            if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
-
+    return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
 
 def est_colonne_date(serie):
     premier = serie.dropna().iloc[0] if serie.notna().any() else None
     return bool(pd.api.types.is_datetime64_any_dtype(serie) or isinstance(premier, (date, datetime))
                 or (isinstance(premier, str) and re.match(r"\d{4}-\d{2}-\d{2}", premier)))
-
 
 def choisir_vue(df, propose, question):
     propose = propose if propose in AFFICHAGES else "tableau"
@@ -174,19 +109,16 @@ def choisir_vue(df, propose, question):
             return "histogramme"
     return propose
 
-
 def dessiner_kpi(df):
     if len(df) == 1:
         items = [(str(c), fmt(df.iloc[0][c])) for c in df.columns[:4]]
     else:
         items = [("Nombre de lignes", fmt(len(df)))]
-        items += [(str(c) if str(c).lower().startswith("total") else f"Total {c}", fmt(df[c].sum()))
-                  for c in colonnes_numeriques(df)[:3]]
+        items += [(str(c) if str(c).lower().startswith("total") else f"Total {c}", fmt(df[c].sum())) for c in colonnes_numeriques(df)[:3]]
     cols = st.columns(len(items))
     for col, (label, valeur) in zip(cols, items):
         with col.container(border=True):
             st.metric(label, valeur)
-
 
 def dessiner_histogramme(df):
     num = colonnes_numeriques(df)
@@ -205,8 +137,7 @@ def dessiner_histogramme(df):
     )
     barres = base.mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4, color="#E8615B")
     etiquettes = base.mark_text(dy=-8).encode(text=alt.Text("valeur", type="quantitative", format=",.0f"))
-    st.altair_chart(barres + etiquettes)
-
+    st.altair_chart(barres + etiquettes, use_container_width=True)
 
 def dessiner_courbe(df):
     num = colonnes_numeriques(df)
@@ -230,16 +161,13 @@ def dessiner_courbe(df):
         color=alt.Color("serie", type="nominal", legend=None if len(ys) == 1 else alt.Legend(title=None)),
         tooltip=["axe", "serie", alt.Tooltip("valeur", format=",.2f")],
     )
-    st.altair_chart(courbe)
-
+    st.altair_chart(courbe, use_container_width=True)
 
 def dessiner_tableau(df):
     a_formater = [c for c in colonnes_numeriques(df) if not str(c).lower().startswith("id")]
-    st.dataframe(df.style.format({c: fmt for c in a_formater}), hide_index=True)
+    st.dataframe(df.style.format({c: fmt for c in a_formater}), use_container_width=True, hide_index=True)
 
-
-RENDUS = {"Tableau": dessiner_tableau, "Histogramme": dessiner_histogramme,
-          "Courbe": dessiner_courbe, "KPI": dessiner_kpi}
+RENDUS = {"Tableau": dessiner_tableau, "Histogramme": dessiner_histogramme, "Courbe": dessiner_courbe, "KPI": dessiner_kpi}
 
 
 def afficher_resultat(res):
@@ -260,8 +188,7 @@ def afficher_resultat(res):
             st.info("Aucun résultat.")
         else:
             defaut = "KPI" if df.shape == (1, 1) else AFFICHAGES.get(res["affichage"], "Tableau")
-            vue = st.radio("Affichage", list(RENDUS), index=list(RENDUS).index(defaut),
-                           horizontal=True, key=f"vue_{res['id']}")
+            vue = st.radio("Affichage", list(RENDUS), index=list(RENDUS).index(defaut), horizontal=True, key=f"vue_{res['id']}")
             if RENDUS[vue](df) is False:
                 st.info(f"La vue « {vue} » ne convient pas à ces données : affichage en tableau.")
                 dessiner_tableau(df)
@@ -281,12 +208,8 @@ def indicateurs():
     requetes = {
         "Instructions en attente": ("SELECT COUNT(*) FROM instructions WHERE statut='en_attente'", {}),
         "Instructions échouées": ("SELECT COUNT(*) FROM instructions WHERE statut='echoue'", {}),
-        "Taux de règlement (%)": (
-            "SELECT ROUND(100.0 * SUM(CASE WHEN statut='regle' THEN 1 ELSE 0 END) / "
-            "NULLIF(SUM(CASE WHEN statut IN ('regle','echoue') THEN 1 ELSE 0 END), 0), 1) FROM instructions", {}),
-        "Règlements à venir (7 jours)": (
-            "SELECT COUNT(*) FROM instructions WHERE date_reglement BETWEEN :d1 AND :d2 "
-            "AND statut IN ('en_attente','apparie')", {"d1": d1, "d2": d2}),
+        "Taux de règlement (%)": ("SELECT ROUND(100.0 * SUM(CASE WHEN statut='regle' THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN statut IN ('regle','echoue') THEN 1 ELSE 0 END), 0), 1) FROM instructions", {}),
+        "Règlements à venir (7 jours)": ("SELECT COUNT(*) FROM instructions WHERE date_reglement BETWEEN :d1 AND :d2 AND statut IN ('en_attente','apparie')", {"d1": d1, "d2": d2}),
     }
     valeurs = {}
     for label, (sql, params) in requetes.items():
@@ -318,18 +241,31 @@ def transcrire(audio_bytes):
     return " ".join(s.text.strip() for s in segments).strip()
 
 
-# =====================  TRAITEMENT D'UNE QUESTION  =====================
+# =====================  TRAITEMENT  =====================
 def traiter(question):
     etapes = []
-
     def noter(texte):
         etapes.append(texte)
         st.write(texte)
 
+    # --- L'AGENT ROUTEUR ---
+    intention = routeur_v2.router(question)
+    noter(f"Agent Routeur : intention « {intention} »")
+
+    if intention == "salutation":
+        return {"id": time.time_ns(), "question": question, "info": "Bonjour ! Je suis votre assistant post-trade. Que puis-je faire ?", "sql": "", "etapes": etapes}
+    if intention == "meta":
+        noter("Agent Routeur : génération d'une réponse métier...")
+        reponse_meta = routeur_v2.repondre_meta(question)
+        return {"id": time.time_ns(), "question": question, "info": reponse_meta, "sql": "", "etapes": etapes}
+    if intention == "hors_sujet":
+        return {"id": time.time_ns(), "question": question, "info": "Désolé, je ne peux répondre qu'aux questions post-trade.", "sql": "", "etapes": etapes}
+
+    # --- SUITE NORMALE ---
     nom_rapport = rapport_ui.detecter_rapport(question)
     if nom_rapport:
-            return rapporteur_v2.generer(nom_rapport, engine, noter)
-    # Agent Sécurité V2 (src/agents/securite.py)
+        return rapporteur_v2.generer(nom_rapport, engine, noter)
+        
     message_garde = garde_v2.reponse_garde(question)
     if message_garde:
         return {"id": time.time_ns(), "question": question, "info": message_garde, "sql": "", "etapes": []}
@@ -340,18 +276,18 @@ def traiter(question):
     if rep.get("hors_sujet") or not str(rep.get("sql", "")).strip():
         return {"id": time.time_ns(), "question": question, "info": garde_v2.MESSAGE_AIDE, "sql": "", "etapes": []}
         
-    # Agent Contrôle V2 (src/agents/controle.py)
     ok, msg = controle_v2.verifier(rep["sql"])
     noter(f"Agent Contrôle : {msg}")
     if not ok:
         raise ValueError(msg)
-        
+
     try:
         df = executer(rep["sql"])
     except Exception as e:
-        noter("Agent SQL : correction après erreur")
-        rep = sql_agent_v2.generer(question, erreur=str(e))
-        # Agent Contrôle V2 (après correction)
+        noter("Agent Correcteur : la requête a échoué, tentative de correction...")
+        # ON APPELLE L'AGENT CORRECTEUR ICI
+        rep = correcteur_v2.corriger(question, rep["sql"], str(e))
+        
         ok, msg = controle_v2.verifier(rep["sql"])
         if not ok:
             raise ValueError(msg)
@@ -360,6 +296,7 @@ def traiter(question):
     vue = choisir_vue(df, rep.get("affichage", "tableau"), question)
     noter(f"Agent Affichage : {len(df)} ligne(s), vue choisie « {vue} »")
     commentaire = analyste_v2.commenter(question, df)
+    
     return {"id": time.time_ns(), "question": question, "sql": rep["sql"], "df": df,
             "affichage": vue, "titre": rep.get("titre", "Résultat"),
             "commentaire": commentaire, "etapes": etapes}
@@ -367,50 +304,29 @@ def traiter(question):
 
 # =====================  INTERFACE  =====================
 st.set_page_config(page_title="Post-trade GenAI", layout="wide")
-
-# --- Menu latéral : discussions enregistrées + bouton "+ Nouveau" ---
 disc.menu()
 
-
-st.title("Assistant GenAI  : monitoring post-trade")
+st.title("Assistant GenAI : monitoring post-trade")
 afficher_indicateurs()
-
 
 def _envoyer_brouillon():
     st.session_state["question_en_attente"] = st.session_state.get("brouillon_vocal", "").strip()
     st.session_state.pop("brouillon_vocal", None)
 
-
 def _annuler_brouillon():
     st.session_state.pop("brouillon_vocal", None)
 
-
-# --- 1) Historique de la discussion courante ---
+# --- 1) Historique ---
 for res in disc.resultats_courants():
-    if res.get("rapport"):
-        st.chat_message("user").write(res.get("question", ""))
-        with st.chat_message("assistant"):
-            rap = res["rapport"]
-            titre = rap.get("titre", "Rapport") if isinstance(rap, dict) else "Rapport"
-            periode = rap.get("periode", "") if isinstance(rap, dict) else ""
-            genere = rap.get("genere_le", "") if isinstance(rap, dict) else ""
-            st.markdown(f"### 📄 {titre}")
-            if periode or genere:
-                st.caption(f"{periode}  |  généré le {genere}")
-            st.info("Rapport enregistré. Cliquez ci-dessous pour le régénérer avec les données actuelles.")
-            if st.button("🔄 Régénérer ce rapport", key=f"regen_{res['id']}"):
-                st.session_state["question_en_attente"] = res.get("question", "")
-                st.rerun()
-        continue
     afficher_resultat(res)
 
-# --- 2) Saisie utilisateur ---
+# --- 2) Saisie ---
 question = st.session_state.pop("question_en_attente", None)
 try:
     saisie = st.chat_input("Écris ton prompt ou clique sur le micro...", accept_audio=True)
 except TypeError:
-    st.sidebar.warning("Pour avoir le micro dans la barre : pip install -U streamlit")
     saisie = st.chat_input("Écris ton prompt...")
+
 if saisie:
     texte_saisi = (saisie if isinstance(saisie, str) else (saisie.text or "")).strip()
     audio = None if isinstance(saisie, str) else getattr(saisie, "audio", None)
@@ -421,8 +337,7 @@ if saisie:
     elif texte_saisi:
         question = texte_saisi
 
-
-# --- 3) Traitement + enregistrement + rafraîchissement immédiat ---
+# --- 3) Traitement ---
 if question:
     zone = st.empty()
     with zone.container():
@@ -437,26 +352,19 @@ if question:
                     status.update(label="Erreur", state="error")
     zone.empty()
 
-       # On enregistre TOUS les résultats dans l'historique
     r = st.session_state.get("resultat")
     if r:
         disc.ajouter(r)
-        # On force le rafraîchissement pour que la sidebar se mette à jour immédiatement
         st.rerun()
 
-# --- 4) Afficher le dernier résultat s'il n'est pas dans l'historique ---
+# --- 4) Affichage du dernier résultat ---
 if st.session_state.get("resultat"):
     dernier = st.session_state["resultat"]
-    # On vérifie si ce résultat est déjà affiché par l'historique
     deja_affiche = any(r.get("id") == dernier.get("id") for r in disc.resultats_courants())
-    
     if not deja_affiche:
         afficher_resultat(dernier)
-        
-    # ON NETTOIE : on le retire de la mémoire pour ne pas l'afficher au prochain clic
     if not dernier.get("erreur"): 
         st.session_state.pop("resultat", None)
-
 
 # --- 5) Brouillon vocal ---
 if "brouillon_vocal" in st.session_state:

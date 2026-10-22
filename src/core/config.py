@@ -6,8 +6,12 @@ MODEL = "qwen2.5-coder:3b"
 VOICE_LANG = "fr"
 WHISPER_SIZE = "tiny"
 
-# =====================  BASE DE DONNÉES  =====================
-DB_URL = "postgresql+psycopg2://agent_ro:agent_ro_pwd@localhost:5432/posttrade"
+# =====================  BASE DE DONNÉES  ====================
+import os
+DB_URL = os.getenv(
+    "DB_URL", 
+    "postgresql+psycopg2://agent_ro:agent_ro_pwd@localhost:5432/posttrade"
+)
 # DB_URL = "sqlite:///file:post_trade.db?mode=ro&uri=true"
 # DB_URL = "oracle+oracledb://user:motdepasse@localhost:1521/?service_name=XE"
 

@@ -1,0 +1,57 @@
+services:
+
+  # ---------- Base de données PostgreSQL ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: posttrade-db
+    environment:
+      POSTGRES_USER: agent_ro
+      POSTGRES_PASSWORD: agent_ro_pwd
+      POSTGRES_DB: posttrade
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_ro -d posttrade"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------- LLM Ollama ----------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: posttrade-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------- Application Streamlit ----------
+  app:
+    build: .
+    container_name: posttrade-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      DB_URL: postgresql+psycopg2://agent_ro:agent_ro_pwd@postgres:5432/posttrade
+      OLLAMA_HOST: http://ollama:11434
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app
+    # LA LIGNE MAGIQUE EST ICI :
+    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0 --server.fileWatcherType=none
+
+volumes:
+  postgres_data:
+  ollama_data:

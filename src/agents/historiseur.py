@@ -8,7 +8,6 @@ from pathlib import Path
 
 import streamlit as st
 
-# On pointe vers le fichier de sauvegarde à la racine du projet
 FICHIER = Path(__file__).parent.parent.parent / "discussions.pkl"
 
 
@@ -23,17 +22,10 @@ def _charger():
 
 
 def _allege(res):
-    """Copie du résultat sans les gros objets (DataFrames, bytes PDF/Excel)."""
     copie = dict(res)
     if copie.get("rapport"):
-        r = copie["rapport"]
-        copie["rapport"] = {
-            "titre": r.get("titre", "Rapport"),
-            "periode": r.get("periode", ""),
-            "genere_le": r.get("genere_le", ""),
-        }
-    copie.pop("pdf", None)
-    copie.pop("xlsx", None)
+        copie["rapport"] = {"titre": copie["rapport"].get("titre", "Rapport")}
+        copie["info"] = "Rapport généré. Veuillez reposer la question pour l'afficher à nouveau."
     return copie
 
 
@@ -189,7 +181,8 @@ def _ligne_discussion(d, courante):
                 st.rerun()
         return
 
-    c1, c2, c3, c4 = st.columns([7, 1, 1, 1], vertical_alignment="center")
+    # Ligne normale avec le menu 3 points
+    c1, c2 = st.columns([8, 1], vertical_alignment="center")
     with c1:
         _bouton(
             ("▸ " if d["id"] == courante else "") + d["titre"],
@@ -199,22 +192,22 @@ def _ligne_discussion(d, courante):
             args=(d["id"],),
         )
     with c2:
-        if st.button("✏️", key=f"renb_{d['id']}", help="Renommer"):
-            st.session_state["renommer_id"] = d["id"]
-            st.rerun()
-    with c3:
-        if st.button("🗑️", key=f"supp_{d['id']}", help="Supprimer"):
-            _supprimer(d["id"])
-            st.rerun()
-    with c4:
-        st.download_button(
-            "📤",
-            data=_vers_texte(d),
-            file_name=f"{d['titre'][:30] or 'discussion'}.txt".replace("/", "_"),
-            mime="text/plain",
-            key=f"part_{d['id']}",
-            help="Partager (télécharger en .txt)",
-        )
+        # On utilise st.popover pour faire un menu déroulant !
+        with st.popover("⋮"):
+            if st.button("✏️ Modifier", key=f"renb_{d['id']}", use_container_width=True):
+                st.session_state["renommer_id"] = d["id"]
+                st.rerun()
+            if st.button("🗑️ Supprimer", key=f"supp_{d['id']}", use_container_width=True):
+                _supprimer(d["id"])
+                st.rerun()
+            st.download_button(
+                "📤 Partager",
+                data=_vers_texte(d),
+                file_name=f"{d['titre'][:30] or 'discussion'}.txt".replace("/", "_"),
+                mime="text/plain",
+                key=f"part_{d['id']}",
+                use_container_width=True,
+            )
 
 
 def menu():
