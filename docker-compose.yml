@@ -1,13 +1,11 @@
 services:
-
-  # ---------- PostgreSQL ----------
   postgres:
     image: postgres:16-alpine
     container_name: posttrade-db
     environment:
-      POSTGRES_USER: agent_ro
-      POSTGRES_PASSWORD: agent_ro_pwd
-      POSTGRES_DB: posttrade
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB:  ${DB_NAME}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -19,7 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ---------- Ollama ----------
   ollama:
     image: ollama/ollama:latest
     container_name: posttrade-ollama
@@ -33,7 +30,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ---------- Backend (FastAPI) ----------
   backend:
     build: ./backend
     container_name: posttrade-backend
@@ -48,7 +44,6 @@ services:
     ports:
       - "8000:8000"
 
-  # ---------- Frontend (React) ----------
   frontend:
     build: ./frontend
     container_name: posttrade-frontend
