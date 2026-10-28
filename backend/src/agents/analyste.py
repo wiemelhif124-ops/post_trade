@@ -6,11 +6,17 @@ PROMPT_ANALYSTE = """Tu es l'Agent Analyste post-trade. À partir de la question
 (valeur la plus grande, la plus petite, total). N'interprète pas, n'invente rien."""
 
 
-def commenter(question, df):
+def commenter(question, df, nb_lignes, langue_instruction):
     """Renvoie un commentaire (str) à partir d'une question et d'un DataFrame."""
     if df.empty:
         return ""
+    
+    prompt_modifie = f"""{PROMPT_ANALYSTE}
+    
+    IMPORTANT : Le résultat contient exactement {nb_lignes} lignes. Ne compte pas toi-même.
+    {langue_instruction}"""
+    
     return appeler_llm(
-        PROMPT_ANALYSTE,
-        f"Question : {question}\nRésultat (20 premières lignes) :\n{df.head(20).to_csv(index=False)}",
+        prompt_modifie,
+        f"Question : {question}\nRésultat (5 premières lignes) :\n{df.head(5).to_csv(index=False)}",
     )

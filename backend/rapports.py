@@ -208,11 +208,25 @@ RAPPORTS = {
 
 def construire_rapport(engine, nom, d1=None, d2=None):
     cfg = RAPPORTS[nom]
+    
+    # Si le rapport nécessite des dates mais qu'elles sont vides, on les calcule
+    if cfg.get("debut") is not None:
+        if d1 is None: d1 = date.today() + timedelta(days=cfg["debut"])
+        if d2 is None: d2 = date.today() + timedelta(days=cfg["fin"])
+        periode = f"Période du {d1:%d/%m/%Y} au {d2:%d/%m/%Y}"
+    else:
+        periode = f"Situation au {date.today():%d/%m/%Y}"
+        
     indicateurs, sections = cfg["fn"](engine, d1, d2)
-    periode = (f"Période du {d1:%d/%m/%Y} au {d2:%d/%m/%Y}" if cfg["debut"] is not None
-               else f"Situation au {date.today():%d/%m/%Y}")
-    return {"titre": cfg["titre"], "periode": periode, "genere_le": datetime.now().strftime("%d/%m/%Y %H:%M"),
-            "indicateurs": indicateurs, "sections": sections, "synthese": ""}
+    
+    return {
+        "titre": cfg["titre"], 
+        "periode": periode, 
+        "genere_le": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "indicateurs": indicateurs, 
+        "sections": sections, 
+        "synthese": ""
+    }
 
 
 # ---------------------------------------------------------------- export Excel
